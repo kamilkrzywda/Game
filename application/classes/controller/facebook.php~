@@ -1,0 +1,187 @@
+<?php defined('SYSPATH')or die('No direct access allowed.');
+
+class Controller_Facebook extends Controller_Template{
+
+	public $template='facebook';
+	public $css='style';
+	public $content='';
+
+	public function before(){
+		parent::before();
+
+		FB::instance()->require_login('');
+
+		$this->me=$this->_cached('_get_me_from_facebook', 36000, false, true);
+
+		//if(isset($_GET['request_ids'])){
+		//	$case_id=$this->finishRequest();
+		//	$this->request->redirect('');
+		//}
+
+		$this->_cached('_save_me_as_user_in_database', 36000, false, true);
+
+		$this->canvas=View::factory($this->canvas);
+		$this->template->bind('canvas', $this->canvas);
+		$this->template->bind('css', $this->css);
+	}
+
+	public function after(){
+		$this->content.=View::factory('profiler/stats')->render();
+
+		$this->canvas->set('content', $this->content);
+		parent::after();
+	}
+
+	public function in_arrayr($needle, $array){
+		if(!is_array($array))
+			return false;
+		$it=new RecursiveIteratorIterator(new RecursiveArrayIterator($array));
+		foreach($it AS $element)
+			if($element==$needle)
+				return true;
+		return false;
+	}
+
+	private function _cache_set($cache_name, $data, $time=3600){
+		if(isset(Cache::$instances['file']))
+			$cache=Cache::$instances['file'];
+		else
+			$cache=Cache::instance('file');
+		Cache::instance()->set($cache_name, $data, $time);
+	}
+
+	private function _cache_get($cache_name){
+		if(isset(Cache::$instances['file']))
+			$cache=Cache::$instances['file'];
+		else
+			$cache=Cache::instance('file');
+		return Cache::instance()->get($cache_name);
+	}
+
+	/**
+	 * ustawia cache dla wybranej metody
+	 * @param string $method nazwa cachowanej metody
+	 * @param int $time czas cache
+	 * @param mixed $attr wartość przekazywana do cachowanej metody
+	 * @param boolean $user_unique cache dla danej sesji lub globalne
+	 * @param boolean $force_refresh odswiezenie cache
+	 * @return string
+	 * @todo obsługa dowolnej ilości parametrów
+	 */
+	protected function _cached($method, $time=10, $attr=false, $user_unique=false, $force_refresh=true){
+		if(!isset($this->me))
+			$this->me=$this->_get_me_from_facebook();
+		$cache_name=$method;
+		if($user_unique)
+			$cache_name=$cache_name.'_usr'.$this->me['id'];
+		if($attr!==false)
+			$cache_name=$cache_name.'_attr'.$attr;
+
+		if(($data=$this->_cache_get($cache_name))&&($force_refresh)){
+			//echo 'used cache: ' . $cache_name . '<br />';
+			return $data;
+		}
+		else{
+			if($attr===false){
+				$cache=$this->$method();
+				$this->_cache_set($cache_name, $cache, $time);
+				return $cache;
+			}
+			else{
+				$cache=$this->$method($attr);
+				$this->_cache_set($cache_name, $cache, $time);
+				return $cache;
+			}
+		}
+	}
+
+	protected function _get_me_from_facebook(){
+		return FB::$graph->api('/me');
+	}
+
+  /**
+   *  sortuje alfabetycznie wg imienia
+   */
+	protected function _get_friends(){
+		$temp=FB::$graph->api('/me/friends');
+		$friends=array();
+		foreach($temp['data'] as $friend){
+			$friends[strtr($friend['name'], 'ĘÓĄŚŁŻŹŃęóąśłżźćń', 'EOASLZZCNeoaslzzcn').$friend['id']]=$friend;
+		}
+		asort($friends);
+		return $friends;
+	}
+
+
+	protected function _username($fbid){
+		$this->_cached('_get_user_name_by_fb_id', 36000, $fbid);
+	}
+	protected function _get_user_name_by_fb_id($fbid){
+		$temp=FB::$graph->api('/me/friends');
+    $user=$temp['name'];
+		return $user->name;
+	}
+
+	public function wall_post($friend_fb_id, $title, $description, $link, $img){
+		$zapytanie=array(
+			'name'=>$title,
+			'caption'=>$description,
+      'picture'=>$img,
+			'link'=>$link,
+		);
+
+		FB::$graph->api("/$friend_fb_id/feed", 'post', $zapytanie);
+	}
+
+	private function finishRequest(){
+		if(isset($_GET['request_ids']))
+			$number=(int) $_GET['request_ids'];
+		else
+			$number=false;
+
+		if(($number>10||$place=='messages')&&(isset($_REQUEST["signed_request"]))){
+			$token_url="https://graph.facebook.com/oauth/access_token?"."client_id=".FB::$config['appId']."&client_secret=".FB::$config['secret']."&grant_type=client_credentials";
+
+			$access_token=file_get_contents($token_url);
+
+			$signed_request=$_REQUEST["signed_request"];
+
+			list($encoded_sig, $payload)=explode('.', $signed_request, 2);
+			$data=json_decode(base64_decode(strtr($payload, '-_', '+/')), true);
+			$user_id=$data["user_id"];
+
+			$request_url="https://graph.facebook.com/".$user_id."/apprequests?".$access_token;
+			$requests=file_get_contents($request_url);
+			$req=$requests;
+			$requests=explode("_", $requests);
+			$requests=$requests[0];
+			$requests=explode('id":', $requests);
+			try{
+				$requests=$requests[1];
+			}
+			catch(Exception $e){
+				
+			}
+			$requests=str_replace('"', '', $requests);
+			$data=json_decode($req);
+			$last_id=0;
+			foreach($data->data as $item){
+
+				$fb_id=$item->to->id;
+				if($fb_id==$this->me['id']){
+					$id=$item->id;
+					$delete_url="https://graph.facebook.com/".$id."?".$access_token."&method=delete";
+					try{
+						$result=file_get_contents($delete_url);
+					}
+					catch(Exception $e){
+						
+					}
+					$last_id=(int) $id;
+				}
+			}
+			$case=ORM::factory('request')->where('request_id', '=', $number)->find();
+			return $case->case_id;
+		}
+	}
+}
